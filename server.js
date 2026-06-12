@@ -1,4 +1,7 @@
-// server.js - Single backend for both Customer & Admin pages
+// ============================================================
+// PLUTOS RESTAURANT - BACKEND API SERVER
+// ============================================================
+
 const express = require('express');
 const mysql = require('mysql2');
 const cors = require('cors');
@@ -7,149 +10,246 @@ const jwt = require('jsonwebtoken');
 require('dotenv').config();
 
 const app = express();
-app.use(cors()); // Allows both frontend URLs to call this API
+app.use(cors());
 app.use(express.json());
 
 // ============================================================
-// 1. TIDB DATABASE CONNECTION (SINGLE DATABASE)
+// TIDB DATABASE CONNECTION
 // ============================================================
-const dbConfig = {
+const pool = mysql.createPool({
     host: process.env.DB_HOST,
-    port: process.env.DB_PORT || 4000,
+    port: parseInt(process.env.DB_PORT) || 4000,
     user: process.env.DB_USER,
     password: process.env.DB_PASSWORD,
     database: process.env.DB_NAME,
     ssl: { minVersion: 'TLSv1.2', rejectUnauthorized: true },
     waitForConnections: true,
     connectionLimit: 10
-};
+});
 
-const pool = mysql.createPool(dbConfig);
 const db = pool.promise();
 
-// Test & Initialize DB
-async function initDB() {
+// Test connection on startup
+async function testConnection() {
     try {
-        await db.query('SELECT 1');
+        const [result] = await db.query('SELECT NOW() as time, DATABASE() as db');
         console.log('✅ TiDB Connected!');
-        
-        // Create tables if not exists
-        await db.query(`CREATE TABLE IF NOT EXISTS orders (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            order_id VARCHAR(20) UNIQUE NOT NULL,
-            table_number INT NOT NULL,
-            mobile_number VARCHAR(15) NOT NULL,
-            items JSON NOT NULL,
-            total_before_tax DECIMAL(10,2) NOT NULL,
-            status ENUM('Pending', 'Completed') DEFAULT 'Pending',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )`);
-        
-        await db.query(`CREATE TABLE IF NOT EXISTS admin_users (
-            id INT AUTO_INCREMENT PRIMARY KEY,
-            username VARCHAR(50) UNIQUE NOT NULL,
-            password_hash VARCHAR(255) NOT NULL
-        )`);
-        
-        // Insert default admin (ram/123) if not exists
-        const [admin] = await db.query('SELECT id FROM admin_users WHERE username = "ram"');
-        if (admin.length === 0) {
-            const hashedPassword = await bcrypt.hash('123', 10);
-            await db.query('INSERT INTO admin_users (username, password_hash) VALUES (?, ?)', ['ram', hashedPassword]);
-            console.log('✅ Default admin user created');
-        }
-        
-        console.log('✅ Database tables ready');
-    } catch (err) {
-        console.error('DB Init Error:', err.message);
+        console.log(`   Time: ${result[0].time}`);
+        console.log(`   Database: ${result[0].db}`);
+        return true;
+    } catch (error) {
+        console.error('❌ TiDB Connection Failed:', error.message);
+        return false;
     }
 }
-initDB();
 
 // ============================================================
-// 2. API ENDPOINTS (USED BY BOTH CUSTOMER & ADMIN SITES)
+// HEALTH CHECK (Test if backend is working)
 // ============================================================
-
-// --- Public Routes (Customer) ---
-app.post('/api/orders', async (req, res) => {
-    const { orderId, tableNumber, mobileNumber, items, totalBeforeTax } = req.body;
+app.get('/api/health', async (req, res) => {
     try {
-        await db.query(
-            `INSERT INTO orders (order_id, table_number, mobile_number, items, total_before_tax) 
-             VALUES (?, ?, ?, ?, ?)`,
-            [orderId, tableNumber, mobileNumber, JSON.stringify(items), totalBeforeTax]
-        );
-        res.json({ success: true, orderId });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
+        const [result] = await db.query('SELECT NOW() as time');
+        res.json({
+            status: 'healthy',
+            database: 'TiDB',
+            time: result[0].time,
+            message: 'Backend is running!'
+        });
+    } catch (error) {
+        res.status(500).json({ status: 'unhealthy', error: error.message });
     }
 });
 
-// --- Admin Routes (Protected) ---
+// ============================================================
+// PUBLIC API - CUSTOMER ENDPOINTS
+// ============================================================
+
+// Get all menu items
+app.get('/api/menu', async (req, res) => {
+    try {
+        const [rows] = await db.query(
+            'SELECT id, name, category, rate FROM menu_items WHERE is_available = TRUE ORDER BY id'
+        );
+        res.json(rows);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch menu' });
+    }
+});
+
+// Get categories
+app.get('/api/categories', async (req, res) => {
+    try {
+        const [rows] = await db.query('SELECT DISTINCT category FROM menu_items ORDER BY category');
+        res.json(rows.map(r => r.category));
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch categories' });
+    }
+});
+
+// Create new order
+app.post('/api/orders', async (req, res) => {
+    const { orderId, tableNumber, mobileNumber, items, totalBeforeTax } = req.body;
+    
+    if (!tableNumber || tableNumber < 1 || tableNumber > 10) {
+        return res.status(400).json({ error: 'Invalid table number (1-10 only)' });
+    }
+    
+    try {
+        await db.query(
+            `INSERT INTO orders (order_id, table_number, mobile_number, items, total_before_tax, status) 
+             VALUES (?, ?, ?, ?, ?, 'Pending')`,
+            [orderId, tableNumber, mobileNumber, JSON.stringify(items), totalBeforeTax]
+        );
+        res.json({ success: true, orderId, message: 'Order placed successfully!' });
+    } catch (error) {
+        console.error('Save order error:', error);
+        res.status(500).json({ error: 'Failed to save order' });
+    }
+});
+
+// Get order status
+app.get('/api/orders/:orderId', async (req, res) => {
+    try {
+        const [rows] = await db.query('SELECT * FROM orders WHERE order_id = ?', [req.params.orderId]);
+        if (rows.length === 0) {
+            return res.status(404).json({ error: 'Order not found' });
+        }
+        rows[0].items = JSON.parse(rows[0].items);
+        res.json(rows[0]);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch order' });
+    }
+});
+
+// ============================================================
+// ADMIN API - PROTECTED ENDPOINTS
+// ============================================================
+
+// Admin login
 app.post('/api/admin/login', async (req, res) => {
     const { username, password } = req.body;
+    
     try {
         const [rows] = await db.query('SELECT * FROM admin_users WHERE username = ?', [username]);
-        if (rows.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
+        
+        if (rows.length === 0) {
+            return res.status(401).json({ error: 'Invalid credentials' });
+        }
         
         const isValid = await bcrypt.compare(password, rows[0].password_hash);
-        if (!isValid) return res.status(401).json({ error: 'Invalid credentials' });
+        if (!isValid) {
+            return res.status(401).json({ error: 'Invalid credentials' });
+        }
         
-        const token = jwt.sign({ username }, process.env.JWT_SECRET || 'plutos_secret', { expiresIn: '1d' });
-        res.json({ success: true, token });
-    } catch (err) {
+        const token = jwt.sign(
+            { id: rows[0].id, username: rows[0].username },
+            process.env.JWT_SECRET,
+            { expiresIn: '24h' }
+        );
+        
+        res.json({ success: true, token, user: { username: rows[0].username } });
+    } catch (error) {
         res.status(500).json({ error: 'Login failed' });
     }
 });
 
-// Middleware to protect admin routes
+// Middleware to verify JWT
 function verifyToken(req, res, next) {
-    const token = req.headers['authorization']?.split(' ')[1];
-    if (!token) return res.status(403).json({ error: 'No token provided' });
+    const authHeader = req.headers.authorization;
+    const token = authHeader && authHeader.split(' ')[1];
+    
+    if (!token) {
+        return res.status(401).json({ error: 'Access token required' });
+    }
+    
     try {
-        jwt.verify(token, process.env.JWT_SECRET || 'plutos_secret');
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        req.user = decoded;
         next();
-    } catch (err) {
-        res.status(403).json({ error: 'Invalid token' });
+    } catch (error) {
+        return res.status(403).json({ error: 'Invalid or expired token' });
     }
 }
 
+// Get all orders (Admin only)
 app.get('/api/admin/orders', verifyToken, async (req, res) => {
     try {
         const [rows] = await db.query('SELECT * FROM orders ORDER BY created_at DESC');
-        rows.forEach(order => order.items = JSON.parse(order.items));
+        rows.forEach(order => {
+            order.items = typeof order.items === 'string' ? JSON.parse(order.items) : order.items;
+        });
         res.json(rows);
-    } catch (err) {
-        res.status(500).json({ error: err.message });
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch orders' });
     }
 });
 
+// Update order status
 app.put('/api/admin/orders/:orderId/status', verifyToken, async (req, res) => {
     const { status } = req.body;
+    
+    if (!['Pending', 'Completed', 'Cancelled'].includes(status)) {
+        return res.status(400).json({ error: 'Invalid status' });
+    }
+    
     try {
         await db.query('UPDATE orders SET status = ? WHERE order_id = ?', [status, req.params.orderId]);
         res.json({ success: true });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to update status' });
     }
 });
 
+// Get dashboard stats
 app.get('/api/admin/stats', verifyToken, async (req, res) => {
     try {
         const [total] = await db.query('SELECT COUNT(*) as count FROM orders');
         const [pending] = await db.query('SELECT COUNT(*) as count FROM orders WHERE status = "Pending"');
-        const [today] = await db.query(`SELECT COALESCE(SUM(total_before_tax),0) as sum FROM orders WHERE DATE(created_at) = CURDATE()`);
-        res.json({ totalOrders: total[0].count, pendingOrders: pending[0].count, todayRevenue: today[0].sum });
-    } catch (err) {
-        res.status(500).json({ error: err.message });
+        const [today] = await db.query(
+            'SELECT COALESCE(SUM(total_before_tax), 0) as total FROM orders WHERE DATE(created_at) = CURDATE()'
+        );
+        const [tables] = await db.query(
+            'SELECT COUNT(DISTINCT table_number) as count FROM orders WHERE DATE(created_at) = CURDATE()'
+        );
+        
+        res.json({
+            totalOrders: total[0].count,
+            pendingOrders: pending[0].count,
+            todayRevenue: today[0].total,
+            activeTables: tables[0].count
+        });
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch stats' });
     }
 });
 
 // ============================================================
-// 3. START SERVER
+// START SERVER
 // ============================================================
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`🚀 Backend server running on port ${PORT}`);
-    console.log(`📍 API Base URL: https://plutos-backend.onrender.com/api`);
-});
+
+async function startServer() {
+    const connected = await testConnection();
+    if (connected) {
+        app.listen(PORT, () => {
+            console.log(`
+╔═══════════════════════════════════════════════════════════╗
+║                                                           ║
+║   🍽️  PLUTOS RESTAURANT BACKEND                          ║
+║                                                           ║
+║   ✅ Server: http://localhost:${PORT}                       ║
+║   ✅ API:    http://localhost:${PORT}/api                   ║
+║   ✅ Health: http://localhost:${PORT}/api/health            ║
+║                                                           ║
+║   🔐 Admin Login: ram / 123                               ║
+║                                                           ║
+╚═══════════════════════════════════════════════════════════╝
+            `);
+        });
+    } else {
+        console.error('❌ Cannot start: Database connection failed');
+        process.exit(1);
+    }
+}
+
+startServer();
