@@ -95,7 +95,7 @@ const STATIC_MENU = [
 ];
 
 // ============================================================
-// SIMPLIFIED DATABASE CONNECTION - NO COMPLEX QUERIES
+// SIMPLIFIED DATABASE CONNECTION - NO ALIASES, NO FUNCTIONS
 // ============================================================
 
 let db = null;
@@ -110,14 +110,12 @@ async function connectDB() {
 
     console.log('\n🔍 Checking Database Configuration:');
     console.log(`   DB_HOST: ${DB_HOST || '❌ NOT SET'}`);
-    console.log(`   DB_PORT: ${DB_PORT || '❌ NOT SET'}`);
     console.log(`   DB_USER: ${DB_USER || '❌ NOT SET'}`);
     console.log(`   DB_PASSWORD: ${DB_PASSWORD ? '✅ SET' : '❌ NOT SET'}`);
     console.log(`   DB_NAME: ${DB_NAME || '❌ NOT SET'}`);
 
     if (!DB_HOST || !DB_USER || !DB_PASSWORD) {
-        console.log('\n⚠️ Cannot connect to TiDB - Missing credentials');
-        console.log('📌 Please add these in Render Environment Variables:\n');
+        console.log('\n⚠️ Cannot connect - Missing credentials');
         return false;
     }
 
@@ -134,16 +132,20 @@ async function connectDB() {
             ssl: { minVersion: 'TLSv1.2', rejectUnauthorized: true }
         });
 
-        // SIMPLE TEST QUERY - NO ALIASES
-        const result = await db.query('SELECT 1');
+        // SIMPLE TEST - Just check if we can connect (no functions, no aliases)
+        const testResult = await db.query('SELECT 1');
         
-        console.log('\n✅✅✅ TIDB CONNECTED SUCCESSFULLY! ✅✅✅');
-        dbConnected = true;
+        if (testResult && testResult[0]) {
+            console.log('\n✅✅✅ TIDB CONNECTED SUCCESSFULLY! ✅✅✅');
+            dbConnected = true;
+            
+            // Create tables
+            await createTables();
+            return true;
+        } else {
+            throw new Error('Connection test failed');
+        }
         
-        // Create tables
-        await createTables();
-        
-        return true;
     } catch (error) {
         console.error('\n❌ TiDB Connection Failed:', error.message);
         console.log('\n⚠️ Running in DEMO MODE\n');
@@ -185,7 +187,7 @@ async function createTables() {
             )
         `);
         
-        // Insert default admin
+        // Insert default admin if not exists
         const [rows] = await db.query('SELECT id FROM admin_users WHERE username = ?', ['ram']);
         if (rows.length === 0) {
             const hash = await bcrypt.hash('123', 10);
@@ -240,41 +242,44 @@ app.post('/api/orders', async (req, res) => {
     if (!tableNumber || tableNumber < 1 || tableNumber > 10) {
         return res.status(400).json({ error: 'Invalid table number' });
     }
+    if (!mobileNumber || !/^[0-9]{10}$/.test(mobileNumber)) {
+        return res.status(400).json({ error: 'Valid mobile required' });
+    }
     
     const total = items.reduce((s, i) => s + (i.quantity * i.rate), 0);
     
     if (dbConnected) {
         try {
-            await db.query(
+            const [result] = await db.query(
                 `INSERT INTO orders (order_id, table_number, mobile_number, items, total_before_tax) 
                  VALUES (?, ?, ?, ?, ?)`,
                 [orderId, tableNumber, mobileNumber, JSON.stringify(items), total]
             );
-            console.log(`✅ Saved to TiDB`);
-            return res.json({ success: true, orderId, savedTo: 'TiDB' });
+            console.log(`✅✅✅ Saved to TiDB! ID: ${result.insertId}`);
+            return res.json({ success: true, orderId, savedTo: 'TiDB', message: 'Order saved to database!' });
         } catch (error) {
             console.error('DB Error:', error.message);
         }
     }
     
     console.log(`⚠️ Saved to memory only`);
-    res.json({ success: true, orderId, savedTo: 'Memory' });
+    res.json({ success: true, orderId, savedTo: 'Memory', message: 'Order saved in demo mode' });
 });
 
 // Admin login
 app.post('/api/admin/login', (req, res) => {
     const { username, password } = req.body;
     if (username === 'ram' && password === '123') {
-        const token = jwt.sign({ username }, JWT_SECRET, { expiresIn: '24h' });
-        res.json({ success: true, token });
+        const token = jwt.sign({ username, role: 'admin' }, JWT_SECRET, { expiresIn: '24h' });
+        res.json({ success: true, token, user: { username } });
     } else {
-        res.status(401).json({ error: 'Invalid credentials' });
+        res.status(401).json({ error: 'Invalid credentials. Use: ram / 123' });
     }
 });
 
 function verifyToken(req, res, next) {
     const token = req.headers.authorization?.split(' ')[1];
-    if (!token) return res.status(401).json({ error: 'No token' });
+    if (!token) return res.status(401).json({ error: 'Token required' });
     try {
         req.user = jwt.verify(token, JWT_SECRET);
         next();
@@ -285,9 +290,13 @@ function verifyToken(req, res, next) {
 
 // Get orders
 app.get('/api/admin/orders', verifyToken, async (req, res) => {
+    console.log('📋 Fetching orders...');
+    
     if (dbConnected) {
         try {
             const [rows] = await db.query('SELECT * FROM orders ORDER BY created_at DESC');
+            console.log(`✅ Found ${rows.length} orders in TiDB`);
+            
             const processed = rows.map(order => {
                 let items = [];
                 try {
@@ -295,8 +304,14 @@ app.get('/api/admin/orders', verifyToken, async (req, res) => {
                 } catch(e) { items = []; }
                 const subtotal = order.total_before_tax || 0;
                 return {
-                    ...order,
+                    id: order.id,
+                    order_id: order.order_id,
+                    table_number: order.table_number,
+                    mobile_number: order.mobile_number,
                     items: items,
+                    total_before_tax: subtotal,
+                    status: order.status,
+                    created_at: order.created_at,
                     subtotal: subtotal,
                     cgst: subtotal * 0.025,
                     sgst: subtotal * 0.025,
@@ -305,20 +320,26 @@ app.get('/api/admin/orders', verifyToken, async (req, res) => {
             });
             return res.json(processed);
         } catch (error) {
-            console.error('Fetch error:', error);
+            console.error('Fetch error:', error.message);
         }
     }
+    
+    console.log('⚠️ Returning empty (DB not connected)');
     res.json([]);
 });
 
 // Update status
 app.put('/api/admin/orders/:orderId/status', verifyToken, async (req, res) => {
+    const { status } = req.body;
+    const orderId = req.params.orderId;
+    
     if (dbConnected) {
         try {
-            await db.query('UPDATE orders SET status = ? WHERE order_id = ?', [req.body.status, req.params.orderId]);
+            await db.query('UPDATE orders SET status = ? WHERE order_id = ?', [status, orderId]);
+            console.log(`✅ Order ${orderId} updated to ${status}`);
             return res.json({ success: true });
         } catch (error) {
-            console.error('Update error:', error);
+            console.error('Update error:', error.message);
         }
     }
     res.json({ success: true });
@@ -328,16 +349,19 @@ app.put('/api/admin/orders/:orderId/status', verifyToken, async (req, res) => {
 app.get('/api/admin/stats', verifyToken, async (req, res) => {
     if (dbConnected) {
         try {
-            const [total] = await db.query('SELECT COUNT(*) as count FROM orders');
-            const [pending] = await db.query('SELECT COUNT(*) as count FROM orders WHERE status = "Pending"');
+            const [total] = await db.query('SELECT COUNT(*) as total FROM orders');
+            const [pending] = await db.query('SELECT COUNT(*) as pending FROM orders WHERE status = "Pending"');
+            const [todayTotal] = await db.query('SELECT SUM(total_before_tax) as revenue FROM orders WHERE DATE(created_at) = CURDATE()');
+            const [activeCount] = await db.query('SELECT COUNT(DISTINCT table_number) as active FROM orders WHERE DATE(created_at) = CURDATE()');
+            
             return res.json({
-                totalOrders: total[0].count,
-                pendingOrders: pending[0].count,
-                todayRevenue: 0,
-                activeTables: 0
+                totalOrders: total[0].total || 0,
+                pendingOrders: pending[0].pending || 0,
+                todayRevenue: todayTotal[0].revenue || 0,
+                activeTables: activeCount[0].active || 0
             });
         } catch (error) {
-            console.error('Stats error:', error);
+            console.error('Stats error:', error.message);
         }
     }
     res.json({ totalOrders: 0, pendingOrders: 0, todayRevenue: 0, activeTables: 0 });
@@ -348,8 +372,24 @@ app.get('/api/admin/stats', verifyToken, async (req, res) => {
 // ============================================================
 
 app.listen(PORT, '0.0.0.0', async () => {
-    console.log(`\n🍽️ PLUTOS RESTAURANT BACKEND`);
-    console.log(`✅ Server running on port ${PORT}`);
-    console.log(`🔐 Admin: ram / 123\n`);
+    console.log(`
+╔═══════════════════════════════════════════════════════════════╗
+║                                                               ║
+║   🍽️  PLUTOS RESTAURANT BACKEND                              ║
+║                                                               ║
+║   ✅ Server: http://0.0.0.0:${PORT}                            ║
+║   ✅ Health: /api/health                                      ║
+║                                                               ║
+║   🔐 Admin Login: ram / 123                                   ║
+║                                                               ║
+╚═══════════════════════════════════════════════════════════════╝
+    `);
+    
     await connectDB();
+    
+    if (dbConnected) {
+        console.log('\n🎉 DATABASE CONNECTED! Orders will be saved to TiDB\n');
+    } else {
+        console.log('\n⚠️ DATABASE NOT CONNECTED!\n');
+    }
 });
