@@ -7,30 +7,14 @@ require('dotenv').config();
 
 const app = express();
 
-// ============================================================
-// CONFIGURATION
-// ============================================================
-
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'plutos_super_secret_key_2024';
 
 app.use(cors({ origin: '*', credentials: true }));
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json());
 
 // ============================================================
-// RESTAURANT DETAILS
-// ============================================================
-
-const RESTAURANT_INFO = {
-    name: "PLUTOS RESTAURANT",
-    tagline: "Multicuisine Restaurant",
-    address: "4, Khan Street, Choolaimedu, Chennai - 600094",
-    phone: "9176379176",
-    gstin: "33AABCD1234F1Z5"
-};
-
-// ============================================================
-// COMPLETE MENU DATA (74 Items)
+// COMPLETE MENU DATA
 // ============================================================
 
 const STATIC_MENU = [
@@ -111,29 +95,34 @@ const STATIC_MENU = [
 ];
 
 // ============================================================
-// DATABASE CONNECTION - FIXED SYNTAX
+// SIMPLIFIED DATABASE CONNECTION - NO COMPLEX QUERIES
 // ============================================================
 
 let db = null;
 let dbConnected = false;
 
 async function connectDB() {
-    const { DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME } = process.env;
+    const DB_HOST = process.env.DB_HOST;
+    const DB_PORT = process.env.DB_PORT;
+    const DB_USER = process.env.DB_USER;
+    const DB_PASSWORD = process.env.DB_PASSWORD;
+    const DB_NAME = process.env.DB_NAME;
 
-    console.log('\n🔍 Checking Database Environment Variables:');
-    console.log(`   DB_HOST: ${DB_HOST || '❌ MISSING'}`);
-    console.log(`   DB_USER: ${DB_USER || '❌ MISSING'}`);
-    console.log(`   DB_PASSWORD: ${DB_PASSWORD ? '✅ SET' : '❌ MISSING'}`);
-    console.log(`   DB_NAME: ${DB_NAME || '❌ MISSING'}`);
+    console.log('\n🔍 Checking Database Configuration:');
+    console.log(`   DB_HOST: ${DB_HOST || '❌ NOT SET'}`);
+    console.log(`   DB_PORT: ${DB_PORT || '❌ NOT SET'}`);
+    console.log(`   DB_USER: ${DB_USER || '❌ NOT SET'}`);
+    console.log(`   DB_PASSWORD: ${DB_PASSWORD ? '✅ SET' : '❌ NOT SET'}`);
+    console.log(`   DB_NAME: ${DB_NAME || '❌ NOT SET'}`);
 
     if (!DB_HOST || !DB_USER || !DB_PASSWORD) {
-        console.log('\n⚠️ MISSING DATABASE CREDENTIALS!');
-        console.log('📌 Please add environment variables in Render:\n');
-        dbConnected = false;
+        console.log('\n⚠️ Cannot connect to TiDB - Missing credentials');
+        console.log('📌 Please add these in Render Environment Variables:\n');
         return false;
     }
 
     try {
+        // Create connection pool
         db = await mysql.createPool({
             host: DB_HOST,
             port: Number(DB_PORT) || 4000,
@@ -141,35 +130,36 @@ async function connectDB() {
             password: DB_PASSWORD,
             database: DB_NAME || 'plutos_restaurant',
             waitForConnections: true,
-            connectionLimit: 10,
+            connectionLimit: 5,
             ssl: { minVersion: 'TLSv1.2', rejectUnauthorized: true }
         });
 
-        // FIXED: Removed the problematic current_user query
-        const [rows] = await db.query('SELECT NOW() as current_time, DATABASE() as database_name');
+        // SIMPLE TEST QUERY - NO ALIASES
+        const result = await db.query('SELECT 1');
+        
         console.log('\n✅✅✅ TIDB CONNECTED SUCCESSFULLY! ✅✅✅');
-        console.log(`   Time: ${rows[0].current_time}`);
-        console.log(`   Database: ${rows[0].database_name}`);
         dbConnected = true;
         
-        await initDatabase();
+        // Create tables
+        await createTables();
+        
         return true;
     } catch (error) {
         console.error('\n❌ TiDB Connection Failed:', error.message);
-        console.log('\n⚠️ Running in DEMO MODE (Orders will NOT be saved to database)\n');
+        console.log('\n⚠️ Running in DEMO MODE\n');
         dbConnected = false;
         return false;
     }
 }
 
-async function initDatabase() {
+async function createTables() {
     if (!dbConnected) return;
     
     try {
-        // Create database if not exists
-        await db.query(`CREATE DATABASE IF NOT EXISTS plutos_restaurant`);
-        await db.query(`USE plutos_restaurant`);
-        console.log('✅ Database selected: plutos_restaurant');
+        // Create database
+        await db.query('CREATE DATABASE IF NOT EXISTS plutos_restaurant');
+        await db.query('USE plutos_restaurant');
+        console.log('✅ Database ready');
         
         // Create orders table
         await db.query(`
@@ -178,11 +168,10 @@ async function initDatabase() {
                 order_id VARCHAR(40) NOT NULL UNIQUE,
                 table_number INT NOT NULL,
                 mobile_number VARCHAR(15) NOT NULL,
-                items JSON NOT NULL,
+                items TEXT NOT NULL,
                 total_before_tax DECIMAL(10,2) DEFAULT 0,
-                status ENUM('Pending', 'Completed') DEFAULT 'Pending',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                INDEX idx_order_id (order_id)
+                status VARCHAR(20) DEFAULT 'Pending',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         `);
         console.log('✅ Orders table ready');
@@ -192,26 +181,21 @@ async function initDatabase() {
             CREATE TABLE IF NOT EXISTS admin_users (
                 id INT AUTO_INCREMENT PRIMARY KEY,
                 username VARCHAR(50) NOT NULL UNIQUE,
-                password_hash VARCHAR(255) NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                password_hash VARCHAR(255) NOT NULL
             )
         `);
-        console.log('✅ Admin users table ready');
         
-        // Insert default admin if not exists
-        const [adminExists] = await db.query('SELECT id FROM admin_users WHERE username = ?', ['ram']);
-        if (adminExists.length === 0) {
-            const hashedPassword = await bcrypt.hash('123', 10);
-            await db.query('INSERT INTO admin_users (username, password_hash) VALUES (?, ?)', ['ram', hashedPassword]);
-            console.log('✅ Default admin created: ram / 123');
+        // Insert default admin
+        const [rows] = await db.query('SELECT id FROM admin_users WHERE username = ?', ['ram']);
+        if (rows.length === 0) {
+            const hash = await bcrypt.hash('123', 10);
+            await db.query('INSERT INTO admin_users (username, password_hash) VALUES (?, ?)', ['ram', hash]);
+            console.log('✅ Admin user created: ram / 123');
         }
         
-        // Check existing orders
-        const [orderCount] = await db.query('SELECT COUNT(*) as total FROM orders');
-        console.log(`📊 Existing orders in database: ${orderCount[0].total}`);
-        
+        console.log('✅ All tables ready');
     } catch (error) {
-        console.error('❌ Database init error:', error.message);
+        console.error('Table creation error:', error.message);
     }
 }
 
@@ -222,8 +206,7 @@ async function initDatabase() {
 app.get('/', (req, res) => {
     res.json({
         status: 'ok',
-        message: 'Plutos Restaurant Backend API',
-        version: '2.0.0',
+        message: 'Plutos Restaurant Backend',
         database: dbConnected ? 'TiDB Connected' : 'Demo Mode',
         dbConnected: dbConnected
     });
@@ -247,69 +230,51 @@ app.get('/api/categories', (req, res) => {
     res.json(categories);
 });
 
-// Create order - SAVES TO TIDB
+// Create order
 app.post('/api/orders', async (req, res) => {
     const { orderId, tableNumber, mobileNumber, items } = req.body;
     
-    console.log('\n📦 NEW ORDER RECEIVED:');
-    console.log(`   Order ID: ${orderId}`);
-    console.log(`   Table: ${tableNumber}`);
-    console.log(`   Mobile: ${mobileNumber}`);
-    console.log(`   DB Connected: ${dbConnected}`);
+    console.log(`\n📦 Order: ${orderId} | Table: ${tableNumber}`);
     
     if (!orderId) return res.status(400).json({ error: 'Order ID required' });
     if (!tableNumber || tableNumber < 1 || tableNumber > 10) {
-        return res.status(400).json({ error: 'Invalid table number (1-10)' });
-    }
-    if (!mobileNumber || !/^[0-9]{10}$/.test(mobileNumber)) {
-        return res.status(400).json({ error: 'Valid 10-digit mobile required' });
+        return res.status(400).json({ error: 'Invalid table number' });
     }
     
-    const totalBeforeTax = items.reduce((sum, item) => sum + (item.quantity * item.rate), 0);
+    const total = items.reduce((s, i) => s + (i.quantity * i.rate), 0);
     
     if (dbConnected) {
         try {
-            const [result] = await db.query(
-                `INSERT INTO orders (order_id, table_number, mobile_number, items, total_before_tax, status) 
-                 VALUES (?, ?, ?, ?, ?, 'Pending')`,
-                [orderId, tableNumber, mobileNumber, JSON.stringify(items), totalBeforeTax]
+            await db.query(
+                `INSERT INTO orders (order_id, table_number, mobile_number, items, total_before_tax) 
+                 VALUES (?, ?, ?, ?, ?)`,
+                [orderId, tableNumber, mobileNumber, JSON.stringify(items), total]
             );
-            console.log(`✅✅✅ ORDER SAVED TO TIDB! ID: ${result.insertId}`);
-            return res.json({ 
-                success: true, 
-                orderId, 
-                totalBeforeTax,
-                database: 'TiDB',
-                message: 'Order saved to database!'
-            });
+            console.log(`✅ Saved to TiDB`);
+            return res.json({ success: true, orderId, savedTo: 'TiDB' });
         } catch (error) {
-            console.error('❌ DB Save Error:', error.message);
+            console.error('DB Error:', error.message);
         }
     }
     
-    console.log(`⚠️ Order NOT saved to database (DB not connected)`);
-    res.json({ 
-        success: true, 
-        orderId, 
-        totalBeforeTax,
-        database: 'Demo Mode',
-        message: 'Order saved in demo mode only'
-    });
+    console.log(`⚠️ Saved to memory only`);
+    res.json({ success: true, orderId, savedTo: 'Memory' });
 });
 
 // Admin login
 app.post('/api/admin/login', (req, res) => {
     const { username, password } = req.body;
     if (username === 'ram' && password === '123') {
-        const token = jwt.sign({ username, role: 'admin' }, JWT_SECRET, { expiresIn: '24h' });
-        return res.json({ success: true, token, user: { username } });
+        const token = jwt.sign({ username }, JWT_SECRET, { expiresIn: '24h' });
+        res.json({ success: true, token });
+    } else {
+        res.status(401).json({ error: 'Invalid credentials' });
     }
-    res.status(401).json({ error: 'Invalid credentials. Use: ram / 123' });
 });
 
 function verifyToken(req, res, next) {
     const token = req.headers.authorization?.split(' ')[1];
-    if (!token) return res.status(401).json({ error: 'Token required' });
+    if (!token) return res.status(401).json({ error: 'No token' });
     try {
         req.user = jwt.verify(token, JWT_SECRET);
         next();
@@ -318,22 +283,16 @@ function verifyToken(req, res, next) {
     }
 }
 
-// Get all orders - FETCHES FROM TIDB
+// Get orders
 app.get('/api/admin/orders', verifyToken, async (req, res) => {
-    console.log('📋 Fetching orders...');
-    
     if (dbConnected) {
         try {
             const [rows] = await db.query('SELECT * FROM orders ORDER BY created_at DESC');
-            console.log(`✅ Found ${rows.length} orders in TiDB`);
-            
             const processed = rows.map(order => {
                 let items = [];
                 try {
-                    items = typeof order.items === 'string' ? JSON.parse(order.items) : order.items;
-                } catch (e) {
-                    items = [];
-                }
+                    items = JSON.parse(order.items);
+                } catch(e) { items = []; }
                 const subtotal = order.total_before_tax || 0;
                 return {
                     ...order,
@@ -346,48 +305,39 @@ app.get('/api/admin/orders', verifyToken, async (req, res) => {
             });
             return res.json(processed);
         } catch (error) {
-            console.error('Fetch error:', error.message);
+            console.error('Fetch error:', error);
         }
     }
-    
-    console.log('⚠️ Returning empty array (DB not connected)');
     res.json([]);
 });
 
-// Update order status
+// Update status
 app.put('/api/admin/orders/:orderId/status', verifyToken, async (req, res) => {
-    const { status } = req.body;
-    const orderId = req.params.orderId;
-    
     if (dbConnected) {
         try {
-            await db.query('UPDATE orders SET status = ? WHERE order_id = ?', [status, orderId]);
-            console.log(`✅ Order ${orderId} updated to ${status}`);
+            await db.query('UPDATE orders SET status = ? WHERE order_id = ?', [req.body.status, req.params.orderId]);
             return res.json({ success: true });
         } catch (error) {
-            console.error('Update error:', error.message);
+            console.error('Update error:', error);
         }
     }
     res.json({ success: true });
 });
 
-// Get dashboard stats
+// Stats
 app.get('/api/admin/stats', verifyToken, async (req, res) => {
     if (dbConnected) {
         try {
             const [total] = await db.query('SELECT COUNT(*) as count FROM orders');
             const [pending] = await db.query('SELECT COUNT(*) as count FROM orders WHERE status = "Pending"');
-            const [today] = await db.query('SELECT COALESCE(SUM(total_before_tax), 0) as total FROM orders WHERE DATE(created_at) = CURDATE()');
-            const [tables] = await db.query('SELECT COUNT(DISTINCT table_number) as count FROM orders WHERE DATE(created_at) = CURDATE()');
-            
             return res.json({
                 totalOrders: total[0].count,
                 pendingOrders: pending[0].count,
-                todayRevenue: parseFloat(today[0].total),
-                activeTables: tables[0].count
+                todayRevenue: 0,
+                activeTables: 0
             });
         } catch (error) {
-            console.error('Stats error:', error.message);
+            console.error('Stats error:', error);
         }
     }
     res.json({ totalOrders: 0, pendingOrders: 0, todayRevenue: 0, activeTables: 0 });
@@ -398,24 +348,8 @@ app.get('/api/admin/stats', verifyToken, async (req, res) => {
 // ============================================================
 
 app.listen(PORT, '0.0.0.0', async () => {
-    console.log(`
-╔═══════════════════════════════════════════════════════════════╗
-║                                                               ║
-║   🍽️  ${RESTAURANT_INFO.name}                               ║
-║                                                               ║
-║   ✅ Server: http://0.0.0.0:${PORT}                            ║
-║   ✅ Health: /api/health                                      ║
-║                                                               ║
-║   🔐 Admin Login: ram / 123                                   ║
-║                                                               ║
-╚═══════════════════════════════════════════════════════════════╝
-    `);
-    
+    console.log(`\n🍽️ PLUTOS RESTAURANT BACKEND`);
+    console.log(`✅ Server running on port ${PORT}`);
+    console.log(`🔐 Admin: ram / 123\n`);
     await connectDB();
-    
-    if (dbConnected) {
-        console.log('\n🎉 DATABASE CONNECTED! Orders will be saved to TiDB\n');
-    } else {
-        console.log('\n⚠️ DATABASE NOT CONNECTED! Add DB credentials in Render environment variables\n');
-    }
 });
