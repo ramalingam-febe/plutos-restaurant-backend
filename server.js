@@ -1,5 +1,5 @@
 const express = require('express');
-const mysql = require('mysql2');
+const mysql = require('mysql2/promise');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -8,15 +8,41 @@ require('dotenv').config();
 const app = express();
 
 // ============================================================
-// CORS
+// CONFIG
+// ============================================================
+
+const PORT = process.env.PORT || 3000;
+const JWT_SECRET = process.env.JWT_SECRET;
+
+if (!JWT_SECRET) {
+    console.warn('⚠️ JWT_SECRET is not set. Admin authentication is not secure for production.');
+}
+
+const allowedOrigins = [
+    process.env.FRONTEND_URL,
+    process.env.ADMIN_URL,
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+    'http://localhost:5500',
+    'http://127.0.0.1:5500'
+].filter(Boolean);
+
+// ============================================================
+// MIDDLEWARE
 // ============================================================
 
 app.use(cors({
-    origin: true,
+    origin: function (origin, callback) {
+        if (!origin) return callback(null, true);
+        if (allowedOrigins.length === 0 || allowedOrigins.includes(origin)) {
+            return callback(null, true);
+        }
+        return callback(new Error('CORS not allowed for this origin'));
+    },
     credentials: true
 }));
 
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 
 // ============================================================
 // STATIC MENU DATA
@@ -112,138 +138,79 @@ function getStaticMenu() {
 }
 
 // ============================================================
-// HEALTH CHECK ENDPOINTS
-// ============================================================
-
-app.get('/', (req, res) => {
-    res.json({
-        status: 'ok',
-        message: 'Plutos Restaurant Backend is running!',
-        endpoints: {
-            health: '/api/health',
-            menu: '/api/menu',
-            categories: '/api/categories',
-            orders: '/api/orders (POST)',
-            admin_login: '/api/admin/login (POST)',
-            admin_orders: '/api/admin/orders (GET)',
-            admin_stats: '/api/admin/stats (GET)'
-        }
-    });
-});
-
-app.get('/api/health', (req, res) => {
-    res.json({
-        status: 'healthy',
-        time: new Date().toISOString(),
-        message: 'Backend is running!'
-    });
-});
-
-// ============================================================
-// ADMIN LOGIN
-// ============================================================
-
-app.post('/api/admin/login', async (req, res) => {
-    const { username, password } = req.body;
-
-    console.log(`Login attempt: ${username}`);
-
-    if (username === 'ram' && password === '123') {
-        const token = jwt.sign(
-            { username: 'ram', role: 'admin' },
-            process.env.JWT_SECRET || 'plutos_secret_key_2024',
-            { expiresIn: '24h' }
-        );
-
-        return res.json({
-            success: true,
-            token,
-            user: { username: 'ram' }
-        });
-    }
-
-    return res.status(401).json({ error: 'Invalid credentials. Use: ram / 123' });
-});
-
-// ============================================================
-// DATABASE CONNECTION
+// DATABASE
 // ============================================================
 
 let db = null;
 let dbConnected = false;
 
 async function connectDB() {
-    if (!process.env.DB_HOST || !process.env.DB_USER || !process.env.DB_PASSWORD) {
-        console.log('⚠️ No database credentials found. Running in demo mode.');
+    const { DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME } = process.env;
+
+    if (!DB_HOST || !DB_USER || !DB_PASSWORD || !DB_NAME) {
+        console.log('⚠️ Missing DB env values. Running in demo mode.');
         dbConnected = false;
         return false;
     }
 
     try {
-        const pool = mysql.createPool({
-            host: process.env.DB_HOST,
-            port: parseInt(process.env.DB_PORT, 10) || 4000,
-            user: process.env.DB_USER,
-            password: process.env.DB_PASSWORD,
-            database: process.env.DB_NAME || 'plutos_restaurant',
-            ssl: { minVersion: 'TLSv1.2', rejectUnauthorized: true },
+        db = mysql.createPool({
+            host: DB_HOST,
+            port: Number(DB_PORT) || 4000,
+            user: DB_USER,
+            password: DB_PASSWORD,
+            database: DB_NAME,
             waitForConnections: true,
-            connectionLimit: 5
+            connectionLimit: 10,
+            queueLimit: 0,
+            ssl: {
+                minVersion: 'TLSv1.2',
+                rejectUnauthorized: true
+            }
         });
 
-        db = pool.promise();
-
-        const [result] = await db.query('SELECT 1 AS connected, NOW() AS time, DATABASE() AS db');
-        console.log('✅ TiDB Connected!');
-        console.log(`   Time: ${result[0].time}`);
-        console.log(`   Database: ${result[0].db}`);
+        const [rows] = await db.query('SELECT 1 AS connected, NOW() AS time, DATABASE() AS db_name');
+        console.log('✅ Database connected');
+        console.log(`   Time: ${rows[0].time}`);
+        console.log(`   Database: ${rows[0].db_name}`);
 
         dbConnected = true;
         await initTables();
         return true;
     } catch (error) {
-        console.error('❌ TiDB Connection Failed:', error.message);
-        console.log('⚠️ Running in demo mode (data will not persist to database)');
+        console.error('❌ Database connection failed:', error.message);
+        console.log('⚠️ Running in demo mode');
         dbConnected = false;
+        db = null;
         return false;
     }
 }
 
 async function initTables() {
-    if (!dbConnected) return;
+    if (!dbConnected || !db) return;
 
     try {
         await db.query(`
             CREATE TABLE IF NOT EXISTS orders (
                 id INT AUTO_INCREMENT PRIMARY KEY,
-                order_id VARCHAR(30) NOT NULL UNIQUE,
+                order_id VARCHAR(40) NOT NULL UNIQUE,
                 table_number INT NOT NULL,
                 mobile_number VARCHAR(15) NOT NULL,
                 items JSON NOT NULL,
                 total_before_tax DECIMAL(10,2) NOT NULL DEFAULT 0,
-                status ENUM('Pending', 'Completed', 'Cancelled') DEFAULT 'Pending',
+                status ENUM('Pending', 'Completed', 'Cancelled') NOT NULL DEFAULT 'Pending',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         `);
-        console.log('✅ Orders table ready');
 
         await db.query(`
             CREATE TABLE IF NOT EXISTS admin_users (
                 id INT AUTO_INCREMENT PRIMARY KEY,
-                username VARCHAR(50) UNIQUE NOT NULL,
-                password_hash VARCHAR(255) NOT NULL
+                username VARCHAR(50) NOT NULL UNIQUE,
+                password_hash VARCHAR(255) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         `);
-
-        const [admin] = await db.query('SELECT id FROM admin_users WHERE username = ?', ['ram']);
-        if (admin.length === 0) {
-            const hashedPassword = await bcrypt.hash('123', 10);
-            await db.query(
-                'INSERT INTO admin_users (username, password_hash) VALUES (?, ?)',
-                ['ram', hashedPassword]
-            );
-            console.log('✅ Default admin created in DB: ram / 123');
-        }
 
         await db.query(`
             CREATE TABLE IF NOT EXISTS menu_items (
@@ -251,13 +218,26 @@ async function initTables() {
                 name VARCHAR(150) NOT NULL,
                 category VARCHAR(80) NOT NULL,
                 rate DECIMAL(10,2) NOT NULL,
-                is_available BOOLEAN DEFAULT TRUE
+                is_available BOOLEAN NOT NULL DEFAULT TRUE
             )
         `);
 
-        const [menuCount] = await db.query('SELECT COUNT(*) AS count FROM menu_items');
+        const [adminRows] = await db.query(
+            'SELECT id FROM admin_users WHERE username = ? LIMIT 1',
+            ['ram']
+        );
 
-        if (menuCount[0].count === 0) {
+        if (adminRows.length === 0) {
+            const passwordHash = await bcrypt.hash('123', 10);
+            await db.query(
+                'INSERT INTO admin_users (username, password_hash) VALUES (?, ?)',
+                ['ram', passwordHash]
+            );
+            console.log('✅ Default admin created: ram / 123');
+        }
+
+        const [menuCountRows] = await db.query('SELECT COUNT(*) AS count FROM menu_items');
+        if (menuCountRows[0].count === 0) {
             const menuItems = getStaticMenu().map(item => [
                 item.id,
                 item.name,
@@ -271,127 +251,39 @@ async function initTables() {
                 [menuItems]
             );
 
-            console.log('✅ Updated menu inserted');
+            console.log('✅ Static menu inserted');
         }
 
-        console.log('✅ All tables initialized');
+        console.log('✅ Tables ready');
     } catch (error) {
-        console.error('Table init warning:', error.message);
-        console.log('⚠️ Continuing in demo mode for tables');
+        console.error('❌ Table init failed:', error.message);
     }
 }
 
 // ============================================================
-// PUBLIC API
+// HELPERS
 // ============================================================
 
-app.get('/api/menu', async (req, res) => {
-    if (dbConnected) {
-        try {
-            const [rows] = await db.query(
-                'SELECT id, name, category, rate FROM menu_items WHERE is_available = TRUE ORDER BY id'
-            );
-            return res.json(rows);
-        } catch (error) {
-            console.error('Menu fetch DB error:', error.message);
-            return res.json(getStaticMenu());
-        }
+function generateToken(payload) {
+    if (!JWT_SECRET) {
+        throw new Error('JWT_SECRET is required');
     }
 
-    return res.json(getStaticMenu());
-});
-
-app.get('/api/categories', async (req, res) => {
-    if (dbConnected) {
-        try {
-            const [rows] = await db.query(
-                'SELECT DISTINCT category FROM menu_items WHERE is_available = TRUE ORDER BY category'
-            );
-            return res.json(rows.map(row => row.category));
-        } catch (error) {
-            console.error('Category fetch DB error:', error.message);
-        }
-    }
-
-    const categories = [...new Set(getStaticMenu().map(i => i.category))];
-    return res.json(categories);
-});
-
-app.post('/api/orders', async (req, res) => {
-    const { orderId, tableNumber, mobileNumber, items, totalBeforeTax } = req.body;
-
-    if (!orderId) {
-        return res.status(400).json({ error: 'Order ID is required' });
-    }
-
-    if (!tableNumber || tableNumber < 1 || tableNumber > 10) {
-        return res.status(400).json({ error: 'Invalid table number (1-10 only)' });
-    }
-
-    if (!mobileNumber || !/^[0-9]{10}$/.test(String(mobileNumber))) {
-        return res.status(400).json({ error: 'Valid 10-digit mobile number is required' });
-    }
-
-    if (!Array.isArray(items) || items.length === 0) {
-        return res.status(400).json({ error: 'At least one order item is required' });
-    }
-
-    const calculatedTotal = items.reduce((sum, item) => {
-        const qty = Number(item.quantity) || 0;
-        const rate = Number(item.rate) || 0;
-        return sum + (qty * rate);
-    }, 0);
-
-    const finalTotal = typeof totalBeforeTax === 'number' ? totalBeforeTax : calculatedTotal;
-
-    console.log(`📦 Order received: ${orderId} | Table: ${tableNumber} | Total: ₹${finalTotal}`);
-
-    if (dbConnected) {
-        try {
-            await db.query(
-                `INSERT INTO orders
-                (order_id, table_number, mobile_number, items, total_before_tax, status)
-                VALUES (?, ?, ?, ?, ?, 'Pending')`,
-                [orderId, tableNumber, mobileNumber, JSON.stringify(items), finalTotal]
-            );
-
-            return res.json({
-                success: true,
-                orderId,
-                message: 'Order placed successfully!'
-            });
-        } catch (error) {
-            console.error('Save error:', error.message);
-            return res.status(500).json({
-                error: 'Failed to save order'
-            });
-        }
-    }
-
-    return res.json({
-        success: true,
-        orderId,
-        message: 'Order placed successfully! (demo mode)'
-    });
-});
-
-// ============================================================
-// AUTH MIDDLEWARE
-// ============================================================
+    return jwt.sign(payload, JWT_SECRET, { expiresIn: '24h' });
+}
 
 function verifyToken(req, res, next) {
     const authHeader = req.headers.authorization;
-    const token = authHeader && authHeader.split(' ')[1];
+    const token = authHeader?.startsWith('Bearer ')
+        ? authHeader.split(' ')[1]
+        : null;
 
     if (!token) {
         return res.status(401).json({ error: 'Access token required' });
     }
 
     try {
-        const decoded = jwt.verify(
-            token,
-            process.env.JWT_SECRET || 'plutos_secret_key_2024'
-        );
+        const decoded = jwt.verify(token, JWT_SECRET);
         req.user = decoded;
         next();
     } catch (error) {
@@ -399,92 +291,345 @@ function verifyToken(req, res, next) {
     }
 }
 
+function isValidMobile(value) {
+    return /^[0-9]{10}$/.test(String(value || '').trim());
+}
+
+function isValidTableNumber(value) {
+    const table = Number(value);
+    return Number.isInteger(table) && table >= 1 && table <= 10;
+}
+
+function normalizeItems(items) {
+    if (!Array.isArray(items)) return [];
+
+    return items
+        .map(item => ({
+            itemId: Number(item.itemId),
+            itemName: String(item.itemName || item.name || '').trim(),
+            quantity: Number(item.quantity),
+            rate: Number(item.rate)
+        }))
+        .filter(item =>
+            Number.isInteger(item.itemId) &&
+            item.itemId > 0 &&
+            item.itemName &&
+            Number.isFinite(item.quantity) &&
+            item.quantity > 0 &&
+            Number.isFinite(item.rate) &&
+            item.rate >= 0
+        );
+}
+
+function calculateTotal(items) {
+    return items.reduce((sum, item) => sum + (item.quantity * item.rate), 0);
+}
+
+// ============================================================
+// HEALTH CHECK
+// ============================================================
+
+app.get('/', (req, res) => {
+    res.json({
+        status: 'ok',
+        message: 'Plutos Restaurant Backend is running!',
+        dbConnected,
+        endpoints: {
+            health: '/api/health',
+            menu: '/api/menu',
+            categories: '/api/categories',
+            orders: '/api/orders (POST)',
+            admin_login: '/api/admin/login (POST)',
+            admin_orders: '/api/admin/orders (GET)',
+            admin_stats: '/api/admin/stats (GET)',
+            admin_status_update: '/api/admin/orders/:orderId/status (PUT)'
+        }
+    });
+});
+
+app.get('/api/health', (req, res) => {
+    res.json({
+        status: 'healthy',
+        dbConnected,
+        time: new Date().toISOString(),
+        message: 'Backend is running!'
+    });
+});
+
+// ============================================================
+// ADMIN LOGIN
+// ============================================================
+
+app.post('/api/admin/login', async (req, res) => {
+    try {
+        const username = String(req.body.username || '').trim();
+        const password = String(req.body.password || '');
+
+        if (!username || !password) {
+            return res.status(400).json({ error: 'Username and password are required' });
+        }
+
+        console.log(`Login attempt: ${username}`);
+
+        if (dbConnected && db) {
+            const [rows] = await db.query(
+                'SELECT id, username, password_hash FROM admin_users WHERE username = ? LIMIT 1',
+                [username]
+            );
+
+            if (rows.length === 0) {
+                return res.status(401).json({ error: 'Invalid credentials' });
+            }
+
+            const admin = rows[0];
+            const passwordOk = await bcrypt.compare(password, admin.password_hash);
+
+            if (!passwordOk) {
+                return res.status(401).json({ error: 'Invalid credentials' });
+            }
+
+            const token = generateToken({
+                id: admin.id,
+                username: admin.username,
+                role: 'admin'
+            });
+
+            return res.json({
+                success: true,
+                token,
+                user: { username: admin.username }
+            });
+        }
+
+        if (username === 'ram' && password === '123') {
+            const token = generateToken({
+                username: 'ram',
+                role: 'admin'
+            });
+
+            return res.json({
+                success: true,
+                token,
+                user: { username: 'ram' }
+            });
+        }
+
+        return res.status(401).json({ error: 'Invalid credentials' });
+    } catch (error) {
+        console.error('Admin login error:', error.message);
+        return res.status(500).json({ error: 'Login failed' });
+    }
+});
+
+// ============================================================
+// PUBLIC API
+// ============================================================
+
+app.get('/api/menu', async (req, res) => {
+    try {
+        if (dbConnected && db) {
+            const [rows] = await db.query(
+                'SELECT id, name, category, rate FROM menu_items WHERE is_available = TRUE ORDER BY id'
+            );
+            return res.json(rows);
+        }
+
+        return res.json(getStaticMenu());
+    } catch (error) {
+        console.error('Menu fetch error:', error.message);
+        return res.json(getStaticMenu());
+    }
+});
+
+app.get('/api/categories', async (req, res) => {
+    try {
+        if (dbConnected && db) {
+            const [rows] = await db.query(
+                'SELECT DISTINCT category FROM menu_items WHERE is_available = TRUE ORDER BY category'
+            );
+            return res.json(rows.map(row => row.category));
+        }
+
+        const categories = [...new Set(getStaticMenu().map(item => item.category))];
+        return res.json(categories);
+    } catch (error) {
+        console.error('Category fetch error:', error.message);
+        const categories = [...new Set(getStaticMenu().map(item => item.category))];
+        return res.json(categories);
+    }
+});
+
+app.post('/api/orders', async (req, res) => {
+    try {
+        const orderId = String(req.body.orderId || '').trim();
+        const tableNumber = Number(req.body.tableNumber);
+        const mobileNumber = String(req.body.mobileNumber || '').trim();
+        const items = normalizeItems(req.body.items);
+
+        if (!orderId) {
+            return res.status(400).json({ error: 'Order ID is required' });
+        }
+
+        if (!isValidTableNumber(tableNumber)) {
+            return res.status(400).json({ error: 'Invalid table number (1-10 only)' });
+        }
+
+        if (!isValidMobile(mobileNumber)) {
+            return res.status(400).json({ error: 'Valid 10-digit mobile number is required' });
+        }
+
+        if (items.length === 0) {
+            return res.status(400).json({ error: 'At least one valid order item is required' });
+        }
+
+        const calculatedTotal = calculateTotal(items);
+
+        console.log(`📦 Order received: ${orderId} | Table: ${tableNumber} | Total: ₹${calculatedTotal}`);
+
+        if (dbConnected && db) {
+            await db.query(
+                `INSERT INTO orders
+                (order_id, table_number, mobile_number, items, total_before_tax, status)
+                VALUES (?, ?, ?, ?, ?, 'Pending')`,
+                [orderId, tableNumber, mobileNumber, JSON.stringify(items), calculatedTotal]
+            );
+
+            return res.json({
+                success: true,
+                orderId,
+                totalBeforeTax: calculatedTotal,
+                message: 'Order placed successfully!'
+            });
+        }
+
+        return res.json({
+            success: true,
+            orderId,
+            totalBeforeTax: calculatedTotal,
+            message: 'Order placed successfully! (demo mode)'
+        });
+    } catch (error) {
+        console.error('Order save error:', error.message);
+
+        if (error.code === 'ER_DUP_ENTRY') {
+            return res.status(409).json({ error: 'Duplicate order ID. Please try again.' });
+        }
+
+        return res.status(500).json({ error: 'Failed to save order' });
+    }
+});
+
 // ============================================================
 // ADMIN API
 // ============================================================
 
 app.get('/api/admin/orders', verifyToken, async (req, res) => {
-    if (dbConnected) {
-        try {
-            const [rows] = await db.query('SELECT * FROM orders ORDER BY created_at DESC');
+    try {
+        if (dbConnected && db) {
+            const [rows] = await db.query(
+                'SELECT * FROM orders ORDER BY created_at DESC, id DESC'
+            );
 
             const parsedRows = rows.map(order => ({
                 ...order,
-                items: typeof order.items === 'string' ? JSON.parse(order.items) : order.items
+                items: typeof order.items === 'string'
+                    ? JSON.parse(order.items)
+                    : order.items
             }));
 
             return res.json(parsedRows);
-        } catch (error) {
-            console.error('Fetch orders error:', error.message);
-            return res.json([]);
         }
-    }
 
-    return res.json([]);
+        return res.json([]);
+    } catch (error) {
+        console.error('Fetch orders error:', error.message);
+        return res.status(500).json({ error: 'Failed to fetch orders' });
+    }
 });
 
 app.put('/api/admin/orders/:orderId/status', verifyToken, async (req, res) => {
-    const { status } = req.body;
+    try {
+        const orderId = String(req.params.orderId || '').trim();
+        const status = String(req.body.status || '').trim();
 
-    if (!['Pending', 'Completed', 'Cancelled'].includes(status)) {
-        return res.status(400).json({ error: 'Invalid status' });
-    }
+        if (!orderId) {
+            return res.status(400).json({ error: 'Order ID is required' });
+        }
 
-    if (dbConnected) {
-        try {
-            await db.query(
+        if (!['Pending', 'Completed', 'Cancelled'].includes(status)) {
+            return res.status(400).json({ error: 'Invalid status' });
+        }
+
+        if (dbConnected && db) {
+            const [result] = await db.query(
                 'UPDATE orders SET status = ? WHERE order_id = ?',
-                [status, req.params.orderId]
+                [status, orderId]
             );
 
-            return res.json({ success: true });
-        } catch (error) {
-            console.error('Status update error:', error.message);
-            return res.status(500).json({ error: 'Failed to update status' });
-        }
-    }
+            if (result.affectedRows === 0) {
+                return res.status(404).json({ error: 'Order not found' });
+            }
 
-    return res.json({ success: true, message: 'Status updated (demo mode)' });
+            return res.json({ success: true, orderId, status });
+        }
+
+        return res.json({ success: true, orderId, status, message: 'Status updated (demo mode)' });
+    } catch (error) {
+        console.error('Status update error:', error.message);
+        return res.status(500).json({ error: 'Failed to update status' });
+    }
 });
 
 app.get('/api/admin/stats', verifyToken, async (req, res) => {
-    if (dbConnected) {
-        try {
+    try {
+        if (dbConnected && db) {
             const [total] = await db.query('SELECT COUNT(*) AS count FROM orders');
-            const [pending] = await db.query('SELECT COUNT(*) AS count FROM orders WHERE status = "Pending"');
+            const [pending] = await db.query('SELECT COUNT(*) AS count FROM orders WHERE status = ?', ['Pending']);
             const [today] = await db.query('SELECT COALESCE(SUM(total_before_tax), 0) AS total FROM orders WHERE DATE(created_at) = CURDATE()');
             const [tables] = await db.query('SELECT COUNT(DISTINCT table_number) AS count FROM orders WHERE DATE(created_at) = CURDATE()');
 
             return res.json({
-                totalOrders: total[0].count,
-                pendingOrders: pending[0].count,
+                totalOrders: Number(total[0].count) || 0,
+                pendingOrders: Number(pending[0].count) || 0,
                 todayRevenue: Number(today[0].total) || 0,
-                activeTables: tables[0].count
-            });
-        } catch (error) {
-            console.error('Stats error:', error.message);
-            return res.json({
-                totalOrders: 0,
-                pendingOrders: 0,
-                todayRevenue: 0,
-                activeTables: 0
+                activeTables: Number(tables[0].count) || 0
             });
         }
+
+        return res.json({
+            totalOrders: 0,
+            pendingOrders: 0,
+            todayRevenue: 0,
+            activeTables: 0
+        });
+    } catch (error) {
+        console.error('Stats error:', error.message);
+        return res.status(500).json({
+            totalOrders: 0,
+            pendingOrders: 0,
+            todayRevenue: 0,
+            activeTables: 0
+        });
+    }
+});
+
+// ============================================================
+// GLOBAL ERROR HANDLER
+// ============================================================
+
+app.use((err, req, res, next) => {
+    console.error('Unhandled error:', err.message);
+
+    if (err.message && err.message.includes('CORS')) {
+        return res.status(403).json({ error: err.message });
     }
 
-    return res.json({
-        totalOrders: 0,
-        pendingOrders: 0,
-        todayRevenue: 0,
-        activeTables: 0
-    });
+    return res.status(500).json({ error: 'Internal server error' });
 });
 
 // ============================================================
 // START SERVER
 // ============================================================
-
-const PORT = process.env.PORT || 3000;
 
 app.listen(PORT, '0.0.0.0', async () => {
     console.log(`
@@ -493,8 +638,8 @@ app.listen(PORT, '0.0.0.0', async () => {
 ║   🍽️  PLUTOS RESTAURANT BACKEND                          ║
 ║                                                           ║
 ║   ✅ Server: http://0.0.0.0:${PORT}                        ║
-║   ✅ Health: http://localhost:${PORT}/api/health           ║
-║   ✅ Menu:   http://localhost:${PORT}/api/menu             ║
+║   ✅ Health: /api/health                                  ║
+║   ✅ Menu:   /api/menu                                    ║
 ║                                                           ║
 ║   🔐 Admin Login: ram / 123                               ║
 ║                                                           ║
