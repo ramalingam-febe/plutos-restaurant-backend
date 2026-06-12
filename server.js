@@ -1,7 +1,3 @@
-// ============================================================
-// PLUTOS RESTAURANT - BACKEND API SERVER
-// ============================================================
-
 const express = require('express');
 const mysql = require('mysql2');
 const cors = require('cors');
@@ -13,9 +9,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// ============================================================
-// TIDB DATABASE CONNECTION
-// ============================================================
+// TiDB Database Connection
 const pool = mysql.createPool({
     host: process.env.DB_HOST,
     port: parseInt(process.env.DB_PORT) || 4000,
@@ -29,7 +23,7 @@ const pool = mysql.createPool({
 
 const db = pool.promise();
 
-// Test connection on startup
+// Test Database Connection
 async function testConnection() {
     try {
         const [result] = await db.query('SELECT NOW() as time, DATABASE() as db');
@@ -43,40 +37,26 @@ async function testConnection() {
     }
 }
 
-// ============================================================
-// HEALTH CHECK (Test if backend is working)
-// ============================================================
+// ========== HEALTH CHECK ==========
 app.get('/api/health', async (req, res) => {
     try {
         const [result] = await db.query('SELECT NOW() as time');
-        res.json({
-            status: 'healthy',
-            database: 'TiDB',
-            time: result[0].time,
-            message: 'Backend is running!'
-        });
+        res.json({ status: 'healthy', database: 'TiDB', time: result[0].time, message: 'Backend is running!' });
     } catch (error) {
         res.status(500).json({ status: 'unhealthy', error: error.message });
     }
 });
 
-// ============================================================
-// PUBLIC API - CUSTOMER ENDPOINTS
-// ============================================================
-
-// Get all menu items
+// ========== PUBLIC API (CUSTOMER) ==========
 app.get('/api/menu', async (req, res) => {
     try {
-        const [rows] = await db.query(
-            'SELECT id, name, category, rate FROM menu_items WHERE is_available = TRUE ORDER BY id'
-        );
+        const [rows] = await db.query('SELECT id, name, category, rate FROM menu_items WHERE is_available = TRUE ORDER BY id');
         res.json(rows);
     } catch (error) {
         res.status(500).json({ error: 'Failed to fetch menu' });
     }
 });
 
-// Get categories
 app.get('/api/categories', async (req, res) => {
     try {
         const [rows] = await db.query('SELECT DISTINCT category FROM menu_items ORDER BY category');
@@ -86,7 +66,6 @@ app.get('/api/categories', async (req, res) => {
     }
 });
 
-// Create new order
 app.post('/api/orders', async (req, res) => {
     const { orderId, tableNumber, mobileNumber, items, totalBeforeTax } = req.body;
     
@@ -107,13 +86,10 @@ app.post('/api/orders', async (req, res) => {
     }
 });
 
-// Get order status
 app.get('/api/orders/:orderId', async (req, res) => {
     try {
         const [rows] = await db.query('SELECT * FROM orders WHERE order_id = ?', [req.params.orderId]);
-        if (rows.length === 0) {
-            return res.status(404).json({ error: 'Order not found' });
-        }
+        if (rows.length === 0) return res.status(404).json({ error: 'Order not found' });
         rows[0].items = JSON.parse(rows[0].items);
         res.json(rows[0]);
     } catch (error) {
@@ -121,47 +97,28 @@ app.get('/api/orders/:orderId', async (req, res) => {
     }
 });
 
-// ============================================================
-// ADMIN API - PROTECTED ENDPOINTS
-// ============================================================
-
-// Admin login
+// ========== ADMIN API (PROTECTED) ==========
 app.post('/api/admin/login', async (req, res) => {
     const { username, password } = req.body;
     
     try {
         const [rows] = await db.query('SELECT * FROM admin_users WHERE username = ?', [username]);
-        
-        if (rows.length === 0) {
-            return res.status(401).json({ error: 'Invalid credentials' });
-        }
+        if (rows.length === 0) return res.status(401).json({ error: 'Invalid credentials' });
         
         const isValid = await bcrypt.compare(password, rows[0].password_hash);
-        if (!isValid) {
-            return res.status(401).json({ error: 'Invalid credentials' });
-        }
+        if (!isValid) return res.status(401).json({ error: 'Invalid credentials' });
         
-        const token = jwt.sign(
-            { id: rows[0].id, username: rows[0].username },
-            process.env.JWT_SECRET,
-            { expiresIn: '24h' }
-        );
-        
+        const token = jwt.sign({ id: rows[0].id, username: rows[0].username }, process.env.JWT_SECRET, { expiresIn: '24h' });
         res.json({ success: true, token, user: { username: rows[0].username } });
     } catch (error) {
         res.status(500).json({ error: 'Login failed' });
     }
 });
 
-// Middleware to verify JWT
 function verifyToken(req, res, next) {
     const authHeader = req.headers.authorization;
     const token = authHeader && authHeader.split(' ')[1];
-    
-    if (!token) {
-        return res.status(401).json({ error: 'Access token required' });
-    }
-    
+    if (!token) return res.status(401).json({ error: 'Access token required' });
     try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
         req.user = decoded;
@@ -171,27 +128,21 @@ function verifyToken(req, res, next) {
     }
 }
 
-// Get all orders (Admin only)
 app.get('/api/admin/orders', verifyToken, async (req, res) => {
     try {
         const [rows] = await db.query('SELECT * FROM orders ORDER BY created_at DESC');
-        rows.forEach(order => {
-            order.items = typeof order.items === 'string' ? JSON.parse(order.items) : order.items;
-        });
+        rows.forEach(order => { order.items = typeof order.items === 'string' ? JSON.parse(order.items) : order.items; });
         res.json(rows);
     } catch (error) {
         res.status(500).json({ error: 'Failed to fetch orders' });
     }
 });
 
-// Update order status
 app.put('/api/admin/orders/:orderId/status', verifyToken, async (req, res) => {
     const { status } = req.body;
-    
     if (!['Pending', 'Completed', 'Cancelled'].includes(status)) {
         return res.status(400).json({ error: 'Invalid status' });
     }
-    
     try {
         await db.query('UPDATE orders SET status = ? WHERE order_id = ?', [status, req.params.orderId]);
         res.json({ success: true });
@@ -200,17 +151,12 @@ app.put('/api/admin/orders/:orderId/status', verifyToken, async (req, res) => {
     }
 });
 
-// Get dashboard stats
 app.get('/api/admin/stats', verifyToken, async (req, res) => {
     try {
         const [total] = await db.query('SELECT COUNT(*) as count FROM orders');
         const [pending] = await db.query('SELECT COUNT(*) as count FROM orders WHERE status = "Pending"');
-        const [today] = await db.query(
-            'SELECT COALESCE(SUM(total_before_tax), 0) as total FROM orders WHERE DATE(created_at) = CURDATE()'
-        );
-        const [tables] = await db.query(
-            'SELECT COUNT(DISTINCT table_number) as count FROM orders WHERE DATE(created_at) = CURDATE()'
-        );
+        const [today] = await db.query('SELECT COALESCE(SUM(total_before_tax), 0) as total FROM orders WHERE DATE(created_at) = CURDATE()');
+        const [tables] = await db.query('SELECT COUNT(DISTINCT table_number) as count FROM orders WHERE DATE(created_at) = CURDATE()');
         
         res.json({
             totalOrders: total[0].count,
@@ -223,33 +169,17 @@ app.get('/api/admin/stats', verifyToken, async (req, res) => {
     }
 });
 
-// ============================================================
-// START SERVER
-// ============================================================
+// Start Server
 const PORT = process.env.PORT || 3000;
-
-async function startServer() {
-    const connected = await testConnection();
+testConnection().then(connected => {
     if (connected) {
         app.listen(PORT, () => {
-            console.log(`
-╔═══════════════════════════════════════════════════════════╗
-║                                                           ║
-║   🍽️  PLUTOS RESTAURANT BACKEND                          ║
-║                                                           ║
-║   ✅ Server: http://localhost:${PORT}                       ║
-║   ✅ API:    http://localhost:${PORT}/api                   ║
-║   ✅ Health: http://localhost:${PORT}/api/health            ║
-║                                                           ║
-║   🔐 Admin Login: ram / 123                               ║
-║                                                           ║
-╚═══════════════════════════════════════════════════════════╝
-            `);
+            console.log(`\n🚀 Server running on port ${PORT}`);
+            console.log(`📍 API: http://localhost:${PORT}/api`);
+            console.log(`🔐 Admin: ram / 123\n`);
         });
     } else {
         console.error('❌ Cannot start: Database connection failed');
         process.exit(1);
     }
-}
-
-startServer();
+});
