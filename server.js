@@ -184,7 +184,7 @@ async function initDatabase() {
         if (rows.length === 0) {
             const hash = await bcrypt.hash('123', 10);
             await db.query('INSERT INTO admin_users (username, password_hash) VALUES (?, ?)', ['ram', hash]);
-            console.log('✅ Admin user created: ram / 123');
+            console.log('✅ Admin user created: ramram5 / r1234');
         }
         
         console.log('✅ All tables ready');
@@ -433,9 +433,7 @@ app.listen(PORT, '0.0.0.0', async () => {
 ║                                                               ║
 ║   ✅ Server: http://0.0.0.0:${PORT}                            ║
 ║   ✅ Health: /api/health                                      ║
-║                                                               ║
-║   🔐 Admin Login: ram / 123                                   ║
-║                                                               ║
+║                                             ║
 ╚═══════════════════════════════════════════════════════════════╝
     `);
     
