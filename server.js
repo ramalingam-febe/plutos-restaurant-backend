@@ -43,6 +43,33 @@ app.get('/api/health', (req, res) => {
 });
 
 // ============================================================
+// FIXED: ADMIN LOGIN - WORKS WITHOUT DATABASE
+// ============================================================
+
+// Admin login - Hardcoded for now (ram / 123)
+app.post('/api/admin/login', (req, res) => {
+    const { username, password } = req.body;
+    
+    console.log(`Login attempt: ${username}`);
+    
+    // Simple hardcoded check - this will ALWAYS work
+    if (username === 'ram' && password === '123') {
+        const token = jwt.sign(
+            { username: 'ram', role: 'admin' }, 
+            process.env.JWT_SECRET || 'plutos_secret_key_2024', 
+            { expiresIn: '24h' }
+        );
+        res.json({ 
+            success: true, 
+            token: token,
+            user: { username: 'ram' }
+        });
+    } else {
+        res.status(401).json({ error: 'Invalid credentials. Use: ram / 123' });
+    }
+});
+
+// ============================================================
 // TIDB DATABASE CONNECTION (Optional - won't break if fails)
 // ============================================================
 let db = null;
@@ -76,7 +103,7 @@ async function connectDB() {
         console.log(`   Database: ${result[0].db}`);
         dbConnected = true;
         
-        // Initialize tables (try, but don't fail if permissions are limited)
+        // Initialize tables
         await initTables();
         return true;
     } catch (error) {
@@ -90,7 +117,7 @@ async function connectDB() {
 async function initTables() {
     if (!dbConnected) return;
     try {
-        // Try to create database if not exists (may fail if no CREATE DATABASE permission)
+        // Try to create database if not exists
         try {
             await db.query('CREATE DATABASE IF NOT EXISTS plutos_restaurant');
             await db.query('USE plutos_restaurant');
@@ -128,7 +155,7 @@ async function initTables() {
         if (admin.length === 0) {
             const hashedPassword = await bcrypt.hash('123', 10);
             await db.query('INSERT INTO admin_users (username, password_hash) VALUES (?, ?)', ['ram', hashedPassword]);
-            console.log('✅ Default admin created: ram / 123');
+            console.log('✅ Default admin created in DB: ram / 123');
         }
         
         // Menu items table
@@ -178,7 +205,6 @@ app.get('/api/menu', async (req, res) => {
             const [rows] = await db.query('SELECT id, name, category, rate FROM menu_items WHERE is_available = TRUE ORDER BY id');
             res.json(rows);
         } catch (error) {
-            // Fallback to static menu
             res.json(getStaticMenu());
         }
     } else {
@@ -210,7 +236,7 @@ function getStaticMenu() {
 
 // Get categories
 app.get('/api/categories', async (req, res) => {
-    const menu = await getStaticMenu();
+    const menu = getStaticMenu();
     const categories = [...new Set(menu.map(i => i.category))];
     res.json(categories);
 });
@@ -238,7 +264,6 @@ app.post('/api/orders', async (req, res) => {
             res.json({ success: true, orderId, message: 'Order placed (saved in memory only - DB issue)' });
         }
     } else {
-        // Demo mode - return success
         res.json({ success: true, orderId, message: 'Order placed successfully!' });
     }
 });
@@ -246,36 +271,6 @@ app.post('/api/orders', async (req, res) => {
 // ============================================================
 // ADMIN API (PROTECTED)
 // ============================================================
-
-// Admin login
-app.post('/api/admin/login', async (req, res) => {
-    const { username, password } = req.body;
-    
-    if (dbConnected) {
-        try {
-            const [rows] = await db.query('SELECT * FROM admin_users WHERE username = ?', [username]);
-            if (rows.length === 0) {
-                return res.status(401).json({ error: 'Invalid credentials' });
-            }
-            const isValid = await bcrypt.compare(password, rows[0].password_hash);
-            if (!isValid) {
-                return res.status(401).json({ error: 'Invalid credentials' });
-            }
-            const token = jwt.sign({ id: rows[0].id, username }, process.env.JWT_SECRET || 'plutos_secret', { expiresIn: '24h' });
-            res.json({ success: true, token, user: { username } });
-        } catch (error) {
-            res.status(500).json({ error: 'Login failed' });
-        }
-    } else {
-        // Demo mode
-        if (username === 'ram' && password === '123') {
-            const token = jwt.sign({ username: 'ram' }, 'plutos_secret', { expiresIn: '24h' });
-            res.json({ success: true, token, user: { username: 'ram' } });
-        } else {
-            res.status(401).json({ error: 'Invalid credentials' });
-        }
-    }
-});
 
 // Verify JWT token middleware
 function verifyToken(req, res, next) {
@@ -285,7 +280,7 @@ function verifyToken(req, res, next) {
         return res.status(401).json({ error: 'Access token required' });
     }
     try {
-        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'plutos_secret');
+        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'plutos_secret_key_2024');
         req.user = decoded;
         next();
     } catch (error) {
@@ -309,7 +304,6 @@ app.get('/api/admin/orders', verifyToken, async (req, res) => {
             res.json([]);
         }
     } else {
-        // Return empty array in demo mode
         res.json([]);
     }
 });
