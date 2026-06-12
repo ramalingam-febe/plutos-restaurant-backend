@@ -1,7 +1,7 @@
 {
-  "name": "plutos-restaurant-backend",
+  "name": "plutos-backend",
   "version": "1.0.0",
-  "description": "Plutos Restaurant Backend",
+  "description": "Plutos Restaurant Backend API",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
